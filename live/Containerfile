@@ -82,6 +82,19 @@ RUN set -ex; \
     fi; \
     ls -lh /tmp/initramfs.img
 
+# Stage xfsprogs binaries + their non-glibc deps under a fixed path, preserving
+# Debian's multiarch triplet dir (x86_64-linux-gnu / aarch64-linux-gnu). This is
+# resolved from the builder's own arch, so the final-stage COPY below is
+# arch-agnostic and works on both x86_64 and aarch64 runners.
+RUN set -ex; \
+    triplet="$(basename "$(dirname "$(ls /usr/lib/*-linux-gnu/libblkid.so.1)")")"; \
+    mkdir -p "/staging/usr/lib/${triplet}" /staging/usr/sbin; \
+    cp /usr/sbin/mkfs.xfs /usr/sbin/xfs_repair /staging/usr/sbin/; \
+    for l in libinih.so.1 liburcu.so.8 libblkid.so.1 libuuid.so.1; do \
+        cp "/usr/lib/${triplet}/${l}" "/staging/usr/lib/${triplet}/"; \
+    done; \
+    ls -lR /staging
+
 # ── Stage 3: Final live image ─────────────────────────────────────────────────
 ARG TARGET=dakota-nvidia
 ARG TAG=stable
@@ -96,18 +109,13 @@ ARG DEBUG=0
 ENV TARGET=${TARGET} INSTALLER_CHANNEL=${INSTALLER_CHANNEL} DEBUG=${DEBUG}
 
 COPY --from=initramfs-builder /tmp/initramfs.img /tmp/initramfs.img
-# xfsprogs: copy mkfs.xfs AND its shared library deps so the binary actually
-# runs at install time (not just passes the preflight existence check).
-# Deps from: ldd /usr/sbin/mkfs.xfs on debian:sid (non-glibc only):
-#   libblkid.so.1, libuuid.so.1, libinih.so.1, liburcu.so.8
-COPY --from=initramfs-builder /usr/sbin/mkfs.xfs /usr/sbin/mkfs.xfs
-COPY --from=initramfs-builder \
-    /usr/lib/x86_64-linux-gnu/libinih.so.1 \
-    /usr/lib/x86_64-linux-gnu/liburcu.so.8 \
-    /usr/lib/x86_64-linux-gnu/libblkid.so.1 \
-    /usr/lib/x86_64-linux-gnu/libuuid.so.1 \
-    /usr/lib/x86_64-linux-gnu/
-COPY --from=initramfs-builder /usr/sbin/xfs_repair /usr/sbin/xfs_repair
+# xfsprogs: copy mkfs.xfs/xfs_repair AND their non-glibc shared library deps so
+# the binaries actually run at install time (not just pass the preflight existence
+# check). Deps (non-glibc only): libblkid.so.1, libuuid.so.1, libinih.so.1,
+# liburcu.so.8. Staged under a fixed /staging path in the builder so the multiarch
+# triplet dir is preserved arch-agnostically (x86_64 or aarch64).
+COPY --from=initramfs-builder /staging/usr/sbin/ /usr/sbin/
+COPY --from=initramfs-builder /staging/usr/lib/ /usr/lib/
 # Ensure systemd-boot EFI binary is present for the live ISO builder regardless
 # of whether the target distro ships it (e.g. bluefin uses GRUB, not systemd-boot,
 # so the binary is absent from the base image but still needed for the live ISO).

@@ -1,0 +1,127 @@
+# .github/workflows/build-iso-aarch64.yml
+# Builds an aarch64 Dakota live ISO from the fork's aarch64 OCI image and uploads
+# it as a workflow artifact (intended for UTM on Apple Silicon).
+# Fork-local: upstream only builds x86_64 nvidia ISOs. Triggers on push to
+# feat/arm64-iso so main stays clean for upstream sync. Does NOT upload to R2 and
+# does NOT run the x86-only QEMU E2E test.
+#
+# Prerequisite: ghcr.io/t-py-t/dakota:aarch64 must exist (built by the dakota
+# fork's build-aarch64 workflow) and be readable by this job (make the package
+# public, or this repo must be granted package read access).
+
+name: Build Dakota aarch64 Live ISO
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  push:
+    branches:
+      - feat/arm64-iso
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  build-iso-aarch64:
+    name: Build Dakota aarch64 Live ISO (non-nvidia, offline store)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y podman buildah skopeo \
+            mtools xorriso squashfs-tools dosfstools isomd5sum
+
+      - name: Compute lowercase registry owner
+        id: reg
+        run: |
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      # aarch64 non-nvidia payload — nvidia is meaningless on Apple Silicon/UTM.
+      - name: Pull aarch64 payload image
+        env:
+          PAYLOAD: ghcr.io/${{ steps.reg.outputs.owner }}/dakota:aarch64
+        run: |
+          echo "Pulling ${PAYLOAD}"
+          sudo podman pull "${PAYLOAD}"
+
+      # Build the live container (TARGET=dakota selects the non-nvidia image).
+      - name: Build live container — dakota (aarch64)
+        env:
+          OWNER: ${{ steps.reg.outputs.owner }}
+        run: |
+          sudo podman build \
+            --cap-add sys_admin --security-opt label=disable \
+            --layers \
+            --build-arg TARGET=dakota \
+            --build-arg TAG=aarch64 \
+            --build-arg REGISTRY="${OWNER}" \
+            --build-arg INSTALLER_CHANNEL=stable \
+            -t localhost/dakota-live:latest \
+            ./live
+
+      - name: Smoke test — mkfs.xfs runs inside live container
+        run: |
+          sudo podman run --rm localhost/dakota-live:latest mkfs.xfs -V
+
+      - name: Build live squashfs + boot tar
+        env:
+          SUPERISO_COMPRESSION: release
+          SUPERISO_TMPDIR: /var/iso-build
+          PAYLOAD: ghcr.io/${{ steps.reg.outputs.owner }}/dakota:aarch64
+        run: |
+          sudo mkdir -p /var/iso-build
+          sudo -E bash scripts/build-live-squashfs.sh \
+            --oci-image "${PAYLOAD}" \
+            localhost/dakota-live:latest \
+            /var/iso-build/dakota.rootfs.sfs \
+            /var/iso-build/dakota-boot.tar
+
+      - name: Assemble ISO (single-arch aarch64)
+        run: |
+          sudo bash live/src/build-iso.sh \
+            --arch aarch64:/var/iso-build/dakota-boot.tar:/var/iso-build/dakota.rootfs.sfs \
+            /var/iso-build/dakota-live-aarch64.iso
+          mkdir -p output
+          sudo cp /var/iso-build/dakota-live-aarch64.iso output/
+          sudo chown -R "$USER:$(id -gn)" output/
+
+      - name: Compute ISO name + checksum
+        id: iso
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          NAME="dakota-live-aarch64-${DATE}-${SHA}.iso"
+          mv output/dakota-live-aarch64.iso "output/${NAME}"
+          ( cd output && sha256sum "${NAME}" | tee "${NAME}-CHECKSUM" )
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          du -sh "output/${NAME}"
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.iso.outputs.name }}
+          path: |
+            output/${{ steps.iso.outputs.name }}
+            output/${{ steps.iso.outputs.name }}-CHECKSUM
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
