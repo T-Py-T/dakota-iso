@@ -58,6 +58,7 @@ FROM debian:bookworm AS initramfs-builder
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         dracut \
+        dracut-live \
         dmsetup \
         systemd-boot-efi \
         xfsprogs \
