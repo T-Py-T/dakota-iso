@@ -1,0 +1,117 @@
+# .github/workflows/build-installer-aarch64.yml
+# Builds the bootc-installer (GUI) Flatpak for aarch64, which upstream publishes
+# x86_64-only. The installer source (projectbluefin/bootc-installer) is a normal
+# flatpak-builder manifest whose ONLY x86 dependency is the bundled Go toolchain
+# tarball; we swap it for the arm64 toolchain and build on an arm runner.
+# Publishes the aarch64 bundle to the 'installer-aarch64' release so dakota-iso's
+# install-flatpaks.sh can fetch it. Fork-local; not for upstream main.
+
+name: Build bootc-installer Flatpak (aarch64)
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  push:
+    branches:
+      - feat/arm64-installer
+  workflow_dispatch:
+    inputs:
+      installer_ref:
+        description: "bootc-installer git ref to build (branch/tag)"
+        type: string
+        default: prod
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer-aarch64:
+    name: Build bootc-installer Flatpak (aarch64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Checkout dakota-iso (for this workflow)
+        uses: actions/checkout@v4
+
+      - name: Checkout bootc-installer (+ fisherman submodule)
+        uses: actions/checkout@v4
+        with:
+          repository: projectbluefin/bootc-installer
+          ref: ${{ github.event.inputs.installer_ref || 'prod' }}
+          submodules: recursive
+          path: bootc-installer
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            flatpak flatpak-builder git appstream appstream-util dbus ca-certificates
+
+      - name: Init dbus
+        run: |
+          sudo mkdir -p /run/dbus
+          sudo dbus-daemon --system --fork --nopidfile || true
+          sleep 1
+
+      - name: Add Flathub remote
+        run: |
+          flatpak remote-add --user --if-not-exists flathub \
+            https://flathub.org/repo/flathub.flatpakrepo
+
+      # The manifest pins the amd64 Go toolchain. Replace it with the arm64
+      # toolchain (same version) so 'go build' runs natively on the arm runner.
+      - name: Patch Go toolchain to arm64 in manifests
+        working-directory: bootc-installer
+        run: |
+          set -euxo pipefail
+          AMD64_SHA="031f088e5d955bab8657ede27ad4e3bc5b7c1ba281f05f245bcc304f327c987a"
+          ARM64_SHA="a290581cfe4fe28ddd737dde3095f3dbeb7f2e4065cab4eae44dfc53b760c2f7"
+          for m in flatpak/org.bootcinstaller.Installer.json flatpak/org.bootcinstaller.Installer.Devel.json; do
+            [ -f "$m" ] || continue
+            sed -i "s/go1\.26\.1\.linux-amd64\.tar\.gz/go1.26.1.linux-arm64.tar.gz/g" "$m"
+            sed -i "s/${AMD64_SHA}/${ARM64_SHA}/g" "$m"
+            echo "--- patched $m (go module) ---"
+            grep -n "go1.26.1" "$m" || true
+          done
+
+      - name: Build Flatpak (aarch64)
+        working-directory: bootc-installer
+        run: |
+          flatpak-builder --force-clean --user --repo=flatpak-repo \
+            --install-deps-from=flathub \
+            --disable-rofiles-fuse \
+            --arch=aarch64 \
+            build-dir \
+            flatpak/org.bootcinstaller.Installer.json
+
+      - name: Export bundle
+        working-directory: bootc-installer
+        run: |
+          flatpak build-bundle --arch=aarch64 flatpak-repo \
+            org.bootcinstaller.Installer.flatpak \
+            org.bootcinstaller.Installer
+          ls -la org.bootcinstaller.Installer.flatpak
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: org.bootcinstaller.Installer.aarch64.flatpak
+          path: bootc-installer/org.bootcinstaller.Installer.flatpak
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish to installer-aarch64 release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          gh release create installer-aarch64 \
+            --repo "${{ github.repository }}" \
+            --title "bootc-installer Flatpak (aarch64)" \
+            --notes "aarch64 build of org.bootcinstaller.Installer (Go toolchain swapped to arm64). Auto-published by build-installer-aarch64.yml." \
+            --prerelease 2>/dev/null || true
+          gh release upload installer-aarch64 \
+            bootc-installer/org.bootcinstaller.Installer.flatpak \
+            --repo "${{ github.repository }}" --clobber
