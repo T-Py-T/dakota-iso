@@ -19,6 +19,9 @@ on:
   push:
     branches:
       - feat/arm64-iso
+      # Debug branch: same build but with DEBUG=1 (sshd + known passwords) so the
+      # live env can be driven over SSH to verify 'bootc install to-disk'.
+      - feat/arm64-iso-debug
   workflow_dispatch:
 
 permissions:
@@ -67,6 +70,7 @@ jobs:
       - name: Build live container — dakota (aarch64)
         env:
           OWNER: ${{ steps.reg.outputs.owner }}
+          DEBUG: ${{ github.ref_name == 'feat/arm64-iso-debug' && '1' || '0' }}
         run: |
           sudo podman build \
             --cap-add sys_admin --security-opt label=disable \
@@ -75,6 +79,7 @@ jobs:
             --build-arg TAG=aarch64 \
             --build-arg REGISTRY="${OWNER}" \
             --build-arg INSTALLER_CHANNEL=stable \
+            --build-arg DEBUG="${DEBUG}" \
             -t localhost/dakota-live:latest \
             ./live
 
@@ -106,10 +111,14 @@ jobs:
 
       - name: Compute ISO name + checksum
         id: iso
+        env:
+          DEBUG: ${{ github.ref_name == 'feat/arm64-iso-debug' && '1' || '0' }}
         run: |
           DATE=$(date -u +%Y%m%d)
           SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          NAME="dakota-live-aarch64-${DATE}-${SHA}.iso"
+          SUFFIX=""
+          [ "${DEBUG}" = "1" ] && SUFFIX="-debug"
+          NAME="dakota-live-aarch64-${DATE}-${SHA}${SUFFIX}.iso"
           mv output/dakota-live-aarch64.iso "output/${NAME}"
           ( cd output && sha256sum "${NAME}" | tee "${NAME}-CHECKSUM" )
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
