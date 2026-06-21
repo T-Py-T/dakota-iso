@@ -130,10 +130,12 @@ INSTALLER_APP_ID="org.bootcinstaller.Installer"
 # /usr/local -> /var/usrlocal and /var/usrlocal doesn't exist at build time.
 mkdir -p /usr/share/applications
 INSTALLER_DESKTOP_ID="${INSTALLER_APP_ID}.desktop"
+# No --arch: flatpak run defaults to the host arch, so this works on both x86_64
+# and aarch64 (the installer is published for both via dakota-iso's arm build).
 cat > "/usr/share/applications/${INSTALLER_DESKTOP_ID}" << DESKTOPEOF
 [Desktop Entry]
 Name=Dakota Installer
-Exec=/usr/bin/flatpak run --branch=master --arch=x86_64 --command=bootc-installer ${INSTALLER_APP_ID}
+Exec=/usr/bin/flatpak run --branch=master --command=bootc-installer ${INSTALLER_APP_ID}
 Icon=dakota
 Terminal=false
 Type=Application

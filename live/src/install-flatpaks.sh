@@ -34,82 +34,98 @@ fi
 flatpak remote-add --system --if-not-exists flathub \
     https://dl.flathub.org/repo/flathub.flatpakrepo
 
-# The bootc-installer Flatpak is published x86_64-only. On other arches (aarch64)
-# skip it so the live ISO still boots; install via 'bootc install to-disk' instead.
-if [[ "$(flatpak --default-arch)" == "x86_64" ]]; then
-
-# bootc-installer bundle
-# INSTALLER_CHANNEL controls which release to pull from:
+# bootc-installer bundle.
+# Upstream publishes the installer x86_64-only. For aarch64 we build it from
+# source on an arm runner (dakota-iso build-installer-aarch64.yml) and publish
+# the bundle to the installer-aarch64 release, then fetch it here so the live ISO
+# ships a working GUI installer on Apple Silicon too. Unsupported arches fall
+# back to CLI install ('bootc install to-disk').
+#
+# INSTALLER_CHANNEL controls which x86_64 release to pull from:
 #   stable (default) → GitHub "latest" release (non-pre-release)
 #   dev              → latest-dev rolling pre-release (tracks dev branch)
-# Primary source: projectbluefin/bootc-installer (Project Bluefin's fork).
-# Fallback: tuna-os/tuna-installer (upstream) if projectbluefin assets are unavailable.
-# v2.6.1 adds nvidia_imgref GPU auto-detection support.
-INSTALLER_REPO="projectbluefin/bootc-installer"
-FALLBACK_REPO="tuna-os/tuna-installer"
+ARCH="$(flatpak --default-arch)"
 FLATPAK_FILENAME="org.bootcinstaller.Installer.flatpak"
+INSTALLER_APP_ID="org.bootcinstaller.Installer"
 if [[ "${INSTALLER_CHANNEL:-stable}" == "dev" ]]; then
     FLATPAK_FILENAME="org.bootcinstaller.Installer.Devel.flatpak"
-    # projectbluefin/bootc-installer uses tag "latest-dev" for dev builds.
-    # tuna-os/tuna-installer uses tag "continuous-dev" — different naming convention.
-    PRIMARY_URL="https://github.com/${INSTALLER_REPO}/releases/download/latest-dev/${FLATPAK_FILENAME}"
-    FALLBACK_URL="https://github.com/${FALLBACK_REPO}/releases/download/continuous-dev/${FLATPAK_FILENAME}"
-else
-    # Use GitHub's /releases/latest/download/ redirect — always resolves to the
-    # current latest stable release without needing to know the version tag.
-    PRIMARY_URL="https://github.com/${INSTALLER_REPO}/releases/latest/download/${FLATPAK_FILENAME}"
-    FALLBACK_URL="https://github.com/${FALLBACK_REPO}/releases/latest/download/${FLATPAK_FILENAME}"
+    INSTALLER_APP_ID="org.bootcinstaller.Installer.Devel"
 fi
-if ! curl --retry 3 --fail --location \
-    "${PRIMARY_URL}" \
-    -o /tmp/tuna-installer.flatpak 2>/dev/null; then
-    echo "Primary source unavailable, falling back to ${FALLBACK_REPO}..."
-    curl --retry 3 --fail --location \
-        "${FALLBACK_URL}" \
-        -o /tmp/tuna-installer.flatpak
-fi
-INSTALLER_APP_ID="org.bootcinstaller.Installer"
-[[ "${INSTALLER_CHANNEL:-stable}" == "dev" ]] && INSTALLER_APP_ID="org.bootcinstaller.Installer.Devel"
 
-# Import the bundle into a temporary local repo and install from there.
-# flatpak install --bundle in a container build (no running flatpak system
-# daemon) only creates the installer-origin: remote ref — it does NOT create
-# the deploy/ ref that flatpak run/list require.  Installing from a local
-# file:// remote goes through the full deploy pipeline and correctly creates
-# the deploy/ ref so the app is visible and runnable.
-INSTALLER_LOCAL_REPO="/tmp/installer-local-repo"
-ostree init --repo="${INSTALLER_LOCAL_REPO}" --mode=archive-z2
-flatpak build-import-bundle "${INSTALLER_LOCAL_REPO}" /tmp/tuna-installer.flatpak
-rm -f /tmp/tuna-installer.flatpak
-flatpak remote-add --system --no-gpg-verify installer-local "file://${INSTALLER_LOCAL_REPO}"
-flatpak install --system --noninteractive installer-local "${INSTALLER_APP_ID}" || \
-    flatpak update --system --noninteractive "${INSTALLER_APP_ID}"
-flatpak remote-delete --system --force installer-local || true
-rm -rf "${INSTALLER_LOCAL_REPO}"
-
-# flatpak install inside a container build (no flatpak-system-helper daemon)
-# creates the deployment directory but omits the 'active' symlink inside the
-# branch directory, leaving the app unreachable to 'flatpak run'/'flatpak list'.
-# Reproduce the symlink that a normal installation would create.
-_app_arch_dir="/var/lib/flatpak/app/${INSTALLER_APP_ID}/x86_64"
-for _branch_dir in "${_app_arch_dir}"/*/; do
-    _branch_dir="${_branch_dir%/}"
-    [[ -d "${_branch_dir}" ]] || continue
-    if [[ ! -L "${_branch_dir}/active" ]]; then
-        # Find the single deployment hash directory
-        _hash=$(find "${_branch_dir}" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | head -1)
-        if [[ -n "${_hash}" ]]; then
-            ln -sfn "${_hash}" "${_branch_dir}/active"
-            echo "Created active symlink: ${_branch_dir}/active → ${_hash}"
-        fi
+INSTALL_INSTALLER=1
+case "${ARCH}" in
+  x86_64)
+    # Primary: projectbluefin/bootc-installer. Fallback: tuna-os/tuna-installer.
+    INSTALLER_REPO="projectbluefin/bootc-installer"
+    FALLBACK_REPO="tuna-os/tuna-installer"
+    if [[ "${INSTALLER_CHANNEL:-stable}" == "dev" ]]; then
+        PRIMARY_URL="https://github.com/${INSTALLER_REPO}/releases/download/latest-dev/${FLATPAK_FILENAME}"
+        FALLBACK_URL="https://github.com/${FALLBACK_REPO}/releases/download/continuous-dev/${FLATPAK_FILENAME}"
+    else
+        PRIMARY_URL="https://github.com/${INSTALLER_REPO}/releases/latest/download/${FLATPAK_FILENAME}"
+        FALLBACK_URL="https://github.com/${FALLBACK_REPO}/releases/latest/download/${FLATPAK_FILENAME}"
     fi
-done
-
-flatpak override --system --filesystem=/etc:ro "${INSTALLER_APP_ID}"
-
-else
-    echo "WARNING: bootc-installer Flatpak is x86_64-only; building live ISO for $(flatpak --default-arch) without the GUI installer." >&2
+    ;;
+  aarch64)
+    # Built from source (see dakota-iso build-installer-aarch64.yml). Only the
+    # stable app ID is produced for aarch64; INSTALLER_AARCH64_URL overrides the
+    # default fork release location.
+    INSTALLER_APP_ID="org.bootcinstaller.Installer"
+    PRIMARY_URL="${INSTALLER_AARCH64_URL:-https://github.com/T-Py-T/dakota-iso/releases/download/installer-aarch64/org.bootcinstaller.Installer.flatpak}"
+    FALLBACK_URL="${PRIMARY_URL}"
+    ;;
+  *)
+    INSTALL_INSTALLER=0
+    echo "WARNING: no bootc-installer Flatpak for ${ARCH}; building live ISO without the GUI installer." >&2
     echo "WARNING: install Dakota from a terminal with: sudo bootc install to-disk" >&2
+    ;;
+esac
+
+if [[ "${INSTALL_INSTALLER}" == "1" ]]; then
+    if ! curl --retry 3 --fail --location \
+        "${PRIMARY_URL}" \
+        -o /tmp/tuna-installer.flatpak 2>/dev/null; then
+        echo "Primary installer source unavailable, falling back..."
+        curl --retry 3 --fail --location \
+            "${FALLBACK_URL}" \
+            -o /tmp/tuna-installer.flatpak
+    fi
+
+    # Import the bundle into a temporary local repo and install from there.
+    # flatpak install --bundle in a container build (no running flatpak system
+    # daemon) only creates the installer-origin: remote ref — it does NOT create
+    # the deploy/ ref that flatpak run/list require.  Installing from a local
+    # file:// remote goes through the full deploy pipeline and correctly creates
+    # the deploy/ ref so the app is visible and runnable.
+    INSTALLER_LOCAL_REPO="/tmp/installer-local-repo"
+    ostree init --repo="${INSTALLER_LOCAL_REPO}" --mode=archive-z2
+    flatpak build-import-bundle "${INSTALLER_LOCAL_REPO}" /tmp/tuna-installer.flatpak
+    rm -f /tmp/tuna-installer.flatpak
+    flatpak remote-add --system --no-gpg-verify installer-local "file://${INSTALLER_LOCAL_REPO}"
+    flatpak install --system --noninteractive installer-local "${INSTALLER_APP_ID}" || \
+        flatpak update --system --noninteractive "${INSTALLER_APP_ID}"
+    flatpak remote-delete --system --force installer-local || true
+    rm -rf "${INSTALLER_LOCAL_REPO}"
+
+    # flatpak install inside a container build (no flatpak-system-helper daemon)
+    # creates the deployment directory but omits the 'active' symlink inside the
+    # branch directory, leaving the app unreachable to 'flatpak run'/'flatpak list'.
+    # Reproduce the symlink that a normal installation would create.
+    _app_arch_dir="/var/lib/flatpak/app/${INSTALLER_APP_ID}/${ARCH}"
+    for _branch_dir in "${_app_arch_dir}"/*/; do
+        _branch_dir="${_branch_dir%/}"
+        [[ -d "${_branch_dir}" ]] || continue
+        if [[ ! -L "${_branch_dir}/active" ]]; then
+            # Find the single deployment hash directory
+            _hash=$(find "${_branch_dir}" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | head -1)
+            if [[ -n "${_hash}" ]]; then
+                ln -sfn "${_hash}" "${_branch_dir}/active"
+                echo "Created active symlink: ${_branch_dir}/active → ${_hash}"
+            fi
+        fi
+    done
+
+    flatpak override --system --filesystem=/etc:ro "${INSTALLER_APP_ID}"
 fi
 
 # ── Reconcile Flathub apps against the wanted list ───────────────────────────
