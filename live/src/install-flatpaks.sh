@@ -34,6 +34,10 @@ fi
 flatpak remote-add --system --if-not-exists flathub \
     https://dl.flathub.org/repo/flathub.flatpakrepo
 
+# The bootc-installer Flatpak is published x86_64-only. On other arches (aarch64)
+# skip it so the live ISO still boots; install via 'bootc install to-disk' instead.
+if [[ "$(flatpak --default-arch)" == "x86_64" ]]; then
+
 # bootc-installer bundle
 # INSTALLER_CHANNEL controls which release to pull from:
 #   stable (default) → GitHub "latest" release (non-pre-release)
@@ -102,6 +106,11 @@ for _branch_dir in "${_app_arch_dir}"/*/; do
 done
 
 flatpak override --system --filesystem=/etc:ro "${INSTALLER_APP_ID}"
+
+else
+    echo "WARNING: bootc-installer Flatpak is x86_64-only; building live ISO for $(flatpak --default-arch) without the GUI installer." >&2
+    echo "WARNING: install Dakota from a terminal with: sudo bootc install to-disk" >&2
+fi
 
 # ── Reconcile Flathub apps against the wanted list ───────────────────────────
 # In debug mode, skip the full Flathub app list to keep builds fast.
