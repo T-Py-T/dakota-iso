@@ -210,12 +210,22 @@ SFS_LEVEL=3; SFS_BLOCK=131072
 echo ">>> [live-squashfs] mksquashfs -> ${OUTPUT_SFS} (zstd-${SFS_LEVEL}) ..."
 mkdir -p "$(dirname "${OUTPUT_SFS}")"
 
+# Keep the kernel virtual-fs mountpoints in the squashfs as EMPTY dirs.
+# dmsquash-live only treats a squashfs as the live rootfs when /proc exists at
+# its root (dmsquash-live-root: `elif [ -d .../squashfs/proc ]; then FSIMG=...`).
+# Excluding them (the previous `-e proc -e sys ...`) stripped /proc, so the live
+# boot died with "Failed to find a root filesystem in <squashimg>". Recreate them
+# empty so the squashfs is a valid rootfs and dmsquash-live recognises it.
+for _mp in proc sys dev run tmp; do
+    rm -rf "${SFS_ROOT:?}/${_mp}"
+    mkdir -m 0755 -p "${SFS_ROOT}/${_mp}"
+done
+
 mksquashfs "${SFS_ROOT}" "${OUTPUT_SFS}" \
     -noappend -comp zstd \
     -Xcompression-level "${SFS_LEVEL}" \
     -b "${SFS_BLOCK}" \
-    -processors 4 \
-    -e proc -e sys -e dev -e run -e tmp
+    -processors 4
 echo ">>> [live-squashfs] squashfs: $(du -sh "${OUTPUT_SFS}" | cut -f1)"
 
 echo ">>> [live-squashfs] exporting boot files tar ..."
