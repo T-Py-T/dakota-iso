@@ -60,21 +60,20 @@ jobs:
           flatpak remote-add --user --if-not-exists flathub \
             https://flathub.org/repo/flathub.flatpakrepo
 
-      # The manifest pins the amd64 Go toolchain. Replace it with the arm64
-      # toolchain (same version) so 'go build' runs natively on the arm runner.
-      - name: Patch Go toolchain to arm64 in manifests
-        working-directory: bootc-installer
+      # Two arch fixes, applied to the manifest before building:
+      #  1. The Go toolchain source is pinned to amd64 — swap it for arm64.
+      #  2. bazaar v0.7.15's bge/meson.build omits bge-markdown-render.h (and is
+      #     missing wdgt headers defensively) from install_headers, but the
+      #     installed bge.h #includes it, so libpastry fails to compile. Append
+      #     install commands to the libbge module to ship the missing headers.
+      #     (Upstream bug in bazaar-org/bazaar; harmless on x86 too.)
+      - name: Patch manifest for aarch64 (Go arch + missing bge headers)
         run: |
           set -euxo pipefail
-          AMD64_SHA="031f088e5d955bab8657ede27ad4e3bc5b7c1ba281f05f245bcc304f327c987a"
-          ARM64_SHA="a290581cfe4fe28ddd737dde3095f3dbeb7f2e4065cab4eae44dfc53b760c2f7"
-          for m in flatpak/org.bootcinstaller.Installer.json flatpak/org.bootcinstaller.Installer.Devel.json; do
-            [ -f "$m" ] || continue
-            sed -i "s/go1\.26\.1\.linux-amd64\.tar\.gz/go1.26.1.linux-arm64.tar.gz/g" "$m"
-            sed -i "s/${AMD64_SHA}/${ARM64_SHA}/g" "$m"
-            echo "--- patched $m (go module) ---"
-            grep -n "go1.26.1" "$m" || true
-          done
+          python3 scripts/patch-installer-manifest.py \
+            bootc-installer/flatpak/org.bootcinstaller.Installer.json
+          grep -n "go1.26.1\|bge-markdown-render" \
+            bootc-installer/flatpak/org.bootcinstaller.Installer.json || true
 
       - name: Build Flatpak (aarch64)
         working-directory: bootc-installer
